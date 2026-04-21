@@ -1,8 +1,3 @@
-// ============================================
-// server.js — Amazon Data Proxy via RapidAPI
-// يُرفع على Railway.app
-// ============================================
-
 const express = require('express');
 const app = express();
 app.use(express.json());
@@ -12,9 +7,7 @@ const RAPIDAPI_HOST = 'real-time-amazon-data.p.rapidapi.com';
 
 // ══════════════════════════════════════════
 //  Route: POST /get-product
-//  Body: { "asin": "B08N5WRWNW" }
 // ══════════════════════════════════════════
-
 app.post('/get-product', async (req, res) => {
   const { asin } = req.body;
 
@@ -24,7 +17,6 @@ app.post('/get-product', async (req, res) => {
 
   try {
     const url = `https://${RAPIDAPI_HOST}/product-details?asin=${asin}&country=US`;
-
     const response = await fetch(url, {
       method: 'GET',
       headers: {
@@ -38,47 +30,81 @@ app.post('/get-product', async (req, res) => {
     if (!data || data.status !== 'OK' || !data.data) {
       return res.status(404).json({
         success: false,
-        error  : 'المنتج غير موجود أو ASIN خاطئ',
+        error  : 'المنتج غير موجود',
         raw    : data,
       });
     }
 
-    const product = data.data;
+    const p = data.data;
 
-    const title = product.product_title ?? 'بدون عنوان';
+    // ── العنوان ──
+    const title = p.product_title
+      || p.title
+      || p.name
+      || 'بدون عنوان';
 
-    const features = product.product_features ?? [];
-    const description = features.length > 0
-      ? features.slice(0, 4).join(' | ')
-      : (product.product_description ?? 'لا يوجد وصف');
+    // ── الوصف ──
+    let description = 'لا يوجد وصف';
+    if (Array.isArray(p.product_features) && p.product_features.length > 0) {
+      description = p.product_features.slice(0, 4).join(' | ');
+    } else if (Array.isArray(p.about_product) && p.about_product.length > 0) {
+      description = p.about_product.slice(0, 4).join(' | ');
+    } else if (p.product_description) {
+      description = p.product_description;
+    }
 
-    const photos  = product.product_photos ?? [];
-    const mainImg = product.product_main_image_url ?? '';
-    const image   = photos[0] ?? mainImg ?? '';
+    // ── الصورة ── (نجرب كل الحقول الممكنة)
+    let image = '';
+    if (Array.isArray(p.product_photos) && p.product_photos.length > 0) {
+      image = p.product_photos[0];
+    } else if (p.product_main_image_url) {
+      image = p.product_main_image_url;
+    } else if (p.main_image) {
+      image = p.main_image;
+    } else if (p.image) {
+      image = p.image;
+    } else if (Array.isArray(p.images) && p.images.length > 0) {
+      image = p.images[0];
+    }
 
-    const price = product.product_price
-      ?? product.product_original_price
-      ?? 'تحقق من السعر على Amazon';
+    // ── السعر ──
+    const price = p.product_price
+      || p.price
+      || p.product_original_price
+      || p.typical_price_message
+      || 'تحقق من السعر على Amazon';
 
-    return res.json({
-      success    : true,
-      asin,
-      title,
-      description,
-      image,
-      price,
-    });
+    return res.json({ success: true, asin, title, description, image, price });
 
   } catch (err) {
-    console.error('خطأ في RapidAPI:', err.message);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════
+//  Route: POST /debug  ← تُظهر الاستجابة الكاملة من RapidAPI
+// ══════════════════════════════════════════
+app.post('/debug', async (req, res) => {
+  const { asin } = req.body;
+  try {
+    const url = `https://${RAPIDAPI_HOST}/product-details?asin=${asin}&country=US`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-rapidapi-key' : RAPIDAPI_KEY,
+        'x-rapidapi-host': RAPIDAPI_HOST,
+      },
+    });
+    const data = await response.json();
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
 // ══════════════════════════════════════════
 //  Route: GET /health
 // ══════════════════════════════════════════
-
 app.get('/health', (_req, res) => {
   res.json({
     status   : 'ok',
@@ -88,12 +114,7 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ══════════════════════════════════════════
-//  تشغيل السيرفر
-// ══════════════════════════════════════════
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Proxy يعمل على البورت ${PORT}`);
-  console.log(`🔗 Health: http://localhost:${PORT}/health`);
 });
