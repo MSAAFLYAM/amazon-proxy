@@ -1,76 +1,14 @@
 // ============================================
-// server.js — Amazon PA API Proxy
-// يُرفع على Railway.app مجاناً
+// server.js — Amazon Data Proxy via RapidAPI
+// يُرفع على Railway.app
 // ============================================
 
 const express = require('express');
-const crypto  = require('crypto');
-
 const app = express();
 app.use(express.json());
 
-// ── مفاتيح Amazon (تُحفظ في Railway Environment Variables) ──
-const CONFIG = {
-  accessKey  : process.env.AMAZON_ACCESS_KEY,
-  secretKey  : process.env.AMAZON_SECRET_KEY,
-  partnerTag : process.env.AMAZON_PARTNER_TAG,
-  host       : process.env.AMAZON_HOST       || 'webservices.amazon.com',
-  region     : process.env.AMAZON_REGION     || 'us-east-1',
-  marketplace: process.env.AMAZON_MARKETPLACE|| 'www.amazon.com',
-};
-
-// ══════════════════════════════════════════
-//  دوال AWS Signature Version 4
-// ══════════════════════════════════════════
-
-function hmac(key, data, encoding) {
-  return crypto.createHmac('sha256', key).update(data).digest(encoding);
-}
-
-function hash(data) {
-  return crypto.createHash('sha256').update(data).digest('hex');
-}
-
-function getSignatureKey(secret, dateStamp) {
-  const kDate    = hmac('AWS4' + secret, dateStamp);
-  const kRegion  = hmac(kDate,   CONFIG.region);
-  const kService = hmac(kRegion, 'ProductAdvertisingAPI');
-  return           hmac(kService,'aws4_request');
-}
-
-function buildAuthHeader(amzDate, dateStamp, payloadHash) {
-  const credentialScope = `${dateStamp}/${CONFIG.region}/ProductAdvertisingAPI/aws4_request`;
-
-  const canonicalHeaders =
-    `content-encoding:amz-1.0\n` +
-    `content-type:application/json; charset=UTF-8\n` +
-    `host:${CONFIG.host}\n` +
-    `x-amz-date:${amzDate}\n` +
-    `x-amz-target:com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems\n`;
-
-  const signedHeaders = 'content-encoding;content-type;host;x-amz-date;x-amz-target';
-
-  const canonicalRequest = [
-    'POST',
-    '/paapi5/getitems',
-    '',
-    canonicalHeaders,
-    signedHeaders,
-    payloadHash,
-  ].join('\n');
-
-  const stringToSign = [
-    'AWS4-HMAC-SHA256',
-    amzDate,
-    credentialScope,
-    hash(canonicalRequest),
-  ].join('\n');
-
-  const sigKey   = getSignatureKey(CONFIG.secretKey, dateStamp);
-  const signature = hmac(sigKey, stringToSign, 'hex');
-
-  return `AWS4-HMAC-SHA256 Credential=${CONFIG.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-}
+const RAPIDAPI_KEY  = process.env.RAPIDAPI_KEY;
+const RAPIDAPI_HOST = 'real-time-amazon-data.p.rapidapi.com';
 
 // ══════════════════════════════════════════
 //  Route: POST /get-product
@@ -80,53 +18,24 @@ function buildAuthHeader(amzDate, dateStamp, payloadHash) {
 app.post('/get-product', async (req, res) => {
   const { asin } = req.body;
 
-  // ── التحقق من المدخلات ──
   if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
     return res.status(400).json({ success: false, error: 'ASIN غير صالح' });
   }
 
-  const payload = JSON.stringify({
-    ItemIds    : [asin],
-    Resources  : [
-      'Images.Primary.Large',
-      'Images.Primary.Medium',
-      'ItemInfo.Title',
-      'ItemInfo.Features',
-      'ItemInfo.ProductInfo',
-      'Offers.Listings.Price',
-    ],
-    PartnerTag  : CONFIG.partnerTag,
-    PartnerType : 'Associates',
-    Marketplace : CONFIG.marketplace,
-  });
-
-  // ── توقيت الطلب ──
-  const now       = new Date();
-  const amzDate   = now.toISOString().replace(/[-:]|\.\d{3}/g, '').slice(0, 15) + 'Z';
-  const dateStamp = amzDate.slice(0, 8);
-  const payHash   = hash(payload);
-  const authHdr   = buildAuthHeader(amzDate, dateStamp, payHash);
-
-  const endpoint = `https://${CONFIG.host}/paapi5/getitems`;
-
   try {
-    const response = await fetch(endpoint, {
-      method : 'POST',
+    const url = `https://${RAPIDAPI_HOST}/product-details?asin=${asin}&country=US`;
+
+    const response = await fetch(url, {
+      method: 'GET',
       headers: {
-        'content-encoding': 'amz-1.0',
-        'content-type'    : 'application/json; charset=UTF-8',
-        'host'            : CONFIG.host,
-        'x-amz-date'      : amzDate,
-        'x-amz-target'    : 'com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems',
-        'Authorization'   : authHdr,
+        'x-rapidapi-key' : RAPIDAPI_KEY,
+        'x-rapidapi-host': RAPIDAPI_HOST,
       },
-      body: payload,
     });
 
     const data = await response.json();
 
-    // ── التحقق من استجابة Amazon ──
-    if (!data.ItemsResult || !data.ItemsResult.Items?.length) {
+    if (!data || data.status !== 'OK' || !data.data) {
       return res.status(404).json({
         success: false,
         error  : 'المنتج غير موجود أو ASIN خاطئ',
@@ -134,21 +43,23 @@ app.post('/get-product', async (req, res) => {
       });
     }
 
-    const item = data.ItemsResult.Items[0];
+    const product = data.data;
 
-    // ── استخراج البيانات ──
-    const title = item.ItemInfo?.Title?.DisplayValue ?? 'بدون عنوان';
+    const title = product.product_title ?? 'بدون عنوان';
 
-    const features = item.ItemInfo?.Features?.DisplayValues ?? [];
-    const description = features.slice(0, 4).join(' | ') || 'لا يوجد وصف';
+    const features = product.product_features ?? [];
+    const description = features.length > 0
+      ? features.slice(0, 4).join(' | ')
+      : (product.product_description ?? 'لا يوجد وصف');
 
-    const imageHigh = item.Images?.Primary?.Large?.URL  ?? '';
-    const imageMed  = item.Images?.Primary?.Medium?.URL ?? '';
-    const image     = imageHigh || imageMed;
+    const photos  = product.product_photos ?? [];
+    const mainImg = product.product_main_image_url ?? '';
+    const image   = photos[0] ?? mainImg ?? '';
 
-    const price = item.Offers?.Listings?.[0]?.Price?.DisplayAmount ?? 'تحقق من السعر على Amazon';
+    const price = product.product_price
+      ?? product.product_original_price
+      ?? 'تحقق من السعر على Amazon';
 
-    // ── الرد النظيف ──
     return res.json({
       success    : true,
       asin,
@@ -156,29 +67,24 @@ app.post('/get-product', async (req, res) => {
       description,
       image,
       price,
-      marketplace: CONFIG.marketplace,
     });
 
   } catch (err) {
-    console.error('خطأ في الاتصال بـ Amazon API:', err.message);
+    console.error('خطأ في RapidAPI:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // ══════════════════════════════════════════
-//  Route: GET /health  (للتحقق من عمل السيرفر)
+//  Route: GET /health
 // ══════════════════════════════════════════
 
 app.get('/health', (_req, res) => {
   res.json({
     status   : 'ok',
+    provider : 'RapidAPI - Real-Time Amazon Data',
     timestamp: new Date().toISOString(),
-    config   : {
-      host       : CONFIG.host,
-      marketplace: CONFIG.marketplace,
-      region     : CONFIG.region,
-      hasKeys    : !!(CONFIG.accessKey && CONFIG.secretKey && CONFIG.partnerTag),
-    },
+    hasKey   : !!RAPIDAPI_KEY,
   });
 });
 
@@ -189,5 +95,5 @@ app.get('/health', (_req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Proxy يعمل على البورت ${PORT}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log(`🔗 Health: http://localhost:${PORT}/health`);
 });
