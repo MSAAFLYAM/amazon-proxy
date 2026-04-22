@@ -1,109 +1,70 @@
-const express = require('express');
-const app = express();
-app.use(express.json());
+from flask import Flask, request, jsonify
+import requests
+import re
+import os
 
-const RAPIDAPI_KEY  = process.env.RAPIDAPI_KEY;
-const RAPIDAPI_HOST = 'real-time-amazon-data.p.rapidapi.com';
+app = Flask(__name__)
 
-app.post('/get-product', async (req, res) => {
-  const { asin } = req.body;
+RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY")
 
-  if (!asin || !/^[A-Z0-9]{10}$/.test(asin)) {
-    return res.status(400).json({ success: false, error: 'ASIN غير صالح' });
-  }
+def extract_asin(text: str):
+    """يستخرج ASIN من أي صيغة رابط Amazon"""
+    patterns = [
+        r"/dp/([A-Z0-9]{10})",
+        r"/gp/product/([A-Z0-9]{10})",
+        r"asin=([A-Z0-9]{10})",
+        r"/([A-Z0-9]{10})(?:/|\?|$)",
+    ]
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            return m.group(1)
+    return None
 
-  try {
-    const url = `https://${RAPIDAPI_HOST}/product-details?asin=${asin}&country=US`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'x-rapidapi-key' : RAPIDAPI_KEY,
-        'x-rapidapi-host': RAPIDAPI_HOST,
-      },
-    });
+@app.route("/get-product", methods=["POST"])
+def get_product():
+    body = request.get_json(force=True) or {}
 
-    const data = await response.json();
+    # ✅ يقبل "asin" مباشرة أو "url" كامل
+    asin = body.get("asin") or extract_asin(body.get("url", ""))
 
-    if (!data || data.status !== 'OK' || !data.data || Object.keys(data.data).length === 0) {
-      return res.status(404).json({ success: false, error: 'المنتج غير موجود أو ASIN خاطئ' });
+    if not asin:
+        return jsonify({"success": False, "error": "ASIN غير صالح"}), 400
+
+    url = "https://real-time-amazon-data.p.rapidapi.com/product-details"
+    headers = {
+        "X-RapidAPI-Key":  RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "real-time-amazon-data.p.rapidapi.com",
     }
+    params = {"asin": asin, "country": "US"}
 
-    const p = data.data;
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
 
-    // ── العنوان ──
-    const title = p.product_title || 'بدون عنوان';
+        about   = data.get("about_product", [])
+        description = about[0] if about else data.get("product_description", "")
+        photos  = data.get("product_photos", [])
+        image   = photos[0] if photos else data.get("product_main_image_url", "")
 
-    // ── الوصف من about_product ──
-    let description = 'لا يوجد وصف';
-    if (Array.isArray(p.about_product) && p.about_product.length > 0) {
-      description = p.about_product.slice(0, 4).join(' | ');
-    } else if (Array.isArray(p.product_features) && p.product_features.length > 0) {
-      description = p.product_features.slice(0, 4).join(' | ');
-    }
+        return jsonify({
+            "success": True,
+            "data": {
+                "title":       data.get("product_title", ""),
+                "description": description[:500] if description else "",
+                "price":       data.get("product_price", data.get("typical_price_message", "")),
+                "image":       image,
+                "asin":        asin,
+            }
+        })
 
-    // ── الصورة ── product_photos أو product_photo
-    let image = '';
-    if (Array.isArray(p.product_photos) && p.product_photos.length > 0) {
-      image = p.product_photos[0];
-    } else if (p.product_photo) {
-      image = p.product_photo;
-    }
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
-    // ── السعر مع العملة ──
-    let price = 'تحقق من السعر على Amazon';
-    if (p.product_price) {
-      const currency = p.currency || 'USD';
-      const symbol = currency === 'USD' ? '$' : currency;
-      price = `${symbol}${p.product_price}`;
-    }
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
-    // ── التقييم ──
-    const rating = p.product_star_rating || '';
-    const numRatings = p.product_num_ratings || '';
-
-    return res.json({
-      success    : true,
-      asin,
-      title,
-      description,
-      image,
-      price,
-      rating,
-      numRatings,
-      productUrl : p.product_url || `https://www.amazon.com/dp/${asin}`,
-    });
-
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/debug', async (req, res) => {
-  const { asin } = req.body;
-  try {
-    const url = `https://${RAPIDAPI_HOST}/product-details?asin=${asin}&country=US`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'x-rapidapi-key' : RAPIDAPI_KEY,
-        'x-rapidapi-host': RAPIDAPI_HOST,
-      },
-    });
-    const data = await response.json();
-    return res.json(data);
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/health', (_req, res) => {
-  res.json({
-    status   : 'ok',
-    provider : 'RapidAPI - Real-Time Amazon Data',
-    timestamp: new Date().toISOString(),
-    hasKey   : !!RAPIDAPI_KEY,
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Port ${PORT}`));
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
